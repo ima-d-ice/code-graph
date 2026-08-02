@@ -55,9 +55,12 @@ def write_file(file_path: str, content: str, project_root: str) -> str:
         return f"Error writing file: {e}"
 
 
-def glob_search(pattern: str, project_root: str) -> str:
+def glob_search(pattern: str, project_root: str, path: str = ".") -> str:
     """Find files matching a glob pattern."""
-    full_pattern = os.path.join(project_root, pattern)
+    base = os.path.abspath(os.path.join(project_root, path))
+    if not base.startswith(os.path.abspath(project_root)):
+        return "Error: Access denied. Cannot glob outside project root."
+    full_pattern = os.path.join(base, pattern)
     try:
         # Using glob with recursive=True
         matches = glob.glob(full_pattern, recursive=True)
@@ -191,12 +194,13 @@ def register_file_tools(registry, project_root: str, write_access: bool = True):
         input_schema={
             "type": "object",
             "properties": {
-                "pattern": {"type": "string", "description": "Glob pattern"}
+                "pattern": {"type": "string", "description": "Glob pattern"},
+                "path": {"type": "string", "description": "Directory to search in. Use '.' for project root (optional)"}
             },
             "required": ["pattern"]
         },
         required_permission=PermissionMode.PLAN,
-        handler=lambda pattern: glob_search(pattern, project_root)
+        handler=lambda pattern, path=".": glob_search(pattern, project_root, path)
     )
     
     registry.register(
