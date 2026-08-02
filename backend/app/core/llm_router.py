@@ -27,6 +27,50 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+# ─────────────────────────────────────────────
+# Process-global telemetry session
+#
+# Agents create their own LLMRouter instances, so per-run token attribution
+# needs a module-level accumulator. The workflow opens a session via
+# telemetry_begin(run_id) and reads it out with telemetry_end().
+# ─────────────────────────────────────────────
+
+_TELEMETRY = {
+    "run_id": None,
+    "tokens": 0,
+    "requests": 0,
+    "by_model": {},
+}
+
+
+def telemetry_begin(run_id: str) -> None:
+    """Open a telemetry session for a workflow run."""
+    _TELEMETRY.update({"run_id": run_id, "tokens": 0, "requests": 0, "by_model": {}})
+
+
+def telemetry_observe(tokens: int, model: str) -> None:
+    """Accumulate observed usage into the active session (no-op if none)."""
+    if _TELEMETRY["run_id"] is None:
+        return
+    _TELEMETRY["tokens"] += tokens
+    _TELEMETRY["requests"] += 1
+    by_model = _TELEMETRY["by_model"]
+    by_model[model] = by_model.get(model, 0) + tokens
+
+
+def telemetry_end() -> Dict[str, Any]:
+    """Read and close the active session. Returns empty dict if none."""
+    if _TELEMETRY["run_id"] is None:
+        return {}
+    payload = {
+        "run_id": _TELEMETRY["run_id"],
+        "tokens_total": _TELEMETRY["tokens"],
+        "requests": _TELEMETRY["requests"],
+        "tokens_by_model": dict(_TELEMETRY["by_model"]),
+    }
+    _TELEMETRY["run_id"] = None
+    return payload
+
 
 # ─────────────────────────────────────────────
 # Task Types
@@ -386,6 +430,7 @@ class LLMRouter:
                 provider.record_use(tokens)
                 self.session_tokens += tokens
                 self.session_requests += 1
+                telemetry_observe(tokens, provider.model)
 
                 return response_text
 
@@ -464,6 +509,7 @@ class LLMRouter:
             provider.record_use(tokens)
             self.session_tokens += tokens
             self.session_requests += 1
+            telemetry_observe(tokens, provider.model)
 
             # llama-prompt-guard-2-86m returns a single probability score for
             # the "prompt_attack" class (e.g. "0.9995" vs "0.0003"). Map it to

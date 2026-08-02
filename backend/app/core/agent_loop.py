@@ -213,6 +213,8 @@ class AgentLoop:
                 provider.record_use(tokens)
                 self.llm.session_tokens += tokens
                 self.llm.session_requests += 1
+                from app.core.llm_router import telemetry_observe
+                telemetry_observe(tokens, provider.model)
 
                 # Convert response back to dict format
                 result = {

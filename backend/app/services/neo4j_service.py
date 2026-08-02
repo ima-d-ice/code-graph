@@ -664,6 +664,12 @@ class Neo4jService:
                 stats[key] = record["count"] if record else 0
         return stats
 
+    def session_run(self, query: str, **params) -> List[Dict[str, Any]]:
+        """Run a read query and return all records as dicts (generic helper)."""
+        with self._session() as session:
+            result = session.run(query, **params)
+            return [dict(record) for record in result]
+
     def get_orphan_functions(self) -> List[Dict]:
         """Dead-code candidates: functions with no incoming CALLS edge.
 

@@ -51,11 +51,47 @@ class RefactorState(TypedDict):
     # Populated by COMMIT/ABORT (flight recorder audit id)
     flight_record_id: Optional[str] = None
 
+    # Telemetry (per-node wall-clock timings + deterministic fallback flag)
+    node_timings: Dict[str, float]
+    fallback_used: bool
+
+    # Discovery mode: "graph" (Neo4j-first) or "grep" (prompt-only baseline).
+    # Used by the benchmark to A/B the graph moat.
+    discovery_mode: str = "graph"
+
+
+# ─────────────────────────────────────────────
+# Node timing instrumentation
+# ─────────────────────────────────────────────
+
+def _timed_node(name: str):
+    """Decorator: measure a node's wall-clock time into state['node_timings']."""
+    from functools import wraps
+    import time
+
+    def decorator(fn):
+        @wraps(fn)
+        async def wrapper(state: RefactorState) -> Dict[str, Any]:
+            from app.core.progress import bus
+            t0 = time.perf_counter()
+            bus.publish({"event": "node_start", "node": name})
+            result = await fn(state)
+            timings = dict(state.get("node_timings") or {})
+            timings[name] = round((time.perf_counter() - t0) * 1000, 1)
+            result = dict(result)
+            result["node_timings"] = timings
+            bus.publish({"event": "node_end", "node": name,
+                         "duration_ms": timings[name]})
+            return result
+        return wrapper
+    return decorator
+
 
 # ─────────────────────────────────────────────
 # Workflow Nodes
 # ─────────────────────────────────────────────
 
+@_timed_node("PLAN")
 async def plan_node(state: RefactorState) -> Dict[str, Any]:
     """Analyze the objective and create a refactoring plan."""
     logger.info("🟢 [Workflow] Entering PLAN node")
@@ -67,6 +103,7 @@ async def plan_node(state: RefactorState) -> Dict[str, Any]:
     return {"plan": plan, "iteration_count": 0}
 
 
+@_timed_node("DISCOVER")
 async def discover_node(state: RefactorState) -> Dict[str, Any]:
     """Find all affected files using the graph. Graph-first, grep-second."""
     logger.info("🟢 [Workflow] Entering DISCOVER node")
@@ -75,23 +112,33 @@ async def discover_node(state: RefactorState) -> Dict[str, Any]:
 
     # Use planner agent's discovery tools (graph blast radius w/ grep fallback)
     agent = PlannerAgent(state["project_root"])
-    impact = agent.analyze_impact(state["function_name"])
+
+    discovery_mode = state.get("discovery_mode", "graph")
+    if discovery_mode == "grep":
+        # Prompt-only baseline: no graph, pure on-disk text search
+        from app.tools.graph_tools import grep_fallback_impact
+        import json
+        logger.info("🔍 DISCOVER in grep-only mode (prompt-only baseline)")
+        impact = json.loads(grep_fallback_impact(state["function_name"], state["project_root"]))
+    else:
+        impact = agent.analyze_impact(state["function_name"])
 
     # Graph-first enrichment: pull the subgraph neighborhood around the symbol
     graph_context = impact
-    try:
-        from app.services.neo4j_service import Neo4jService
-        neo4j = Neo4jService()
-        subgraph = neo4j.get_subgraph(state["function_name"])
-        neo4j.close()
-        graph_context["subgraph"] = subgraph
-        logger.info(
-            f"🕸️ Subgraph: {len(subgraph.get('affected_files', []))} files, "
-            f"{len(subgraph.get('edges', []))} edges, "
-            f"{len(subgraph.get('direct_callers', []))} direct callers"
-        )
-    except Exception as e:
-        logger.warning(f"Subgraph enrichment unavailable ({e}); proceeding with impact only")
+    if discovery_mode == "graph":
+        try:
+            from app.services.neo4j_service import Neo4jService
+            neo4j = Neo4jService()
+            subgraph = neo4j.get_subgraph(state["function_name"])
+            neo4j.close()
+            graph_context["subgraph"] = subgraph
+            logger.info(
+                f"🕸️ Subgraph: {len(subgraph.get('affected_files', []))} files, "
+                f"{len(subgraph.get('edges', []))} edges, "
+                f"{len(subgraph.get('direct_callers', []))} direct callers"
+            )
+        except Exception as e:
+            logger.warning(f"Subgraph enrichment unavailable ({e}); proceeding with impact only")
 
     # Read all affected files
     affected_files = {}
@@ -171,6 +218,7 @@ def _apply_deterministic_rename(state: RefactorState,
         )
         if deterministic:
             logger.info(f"⚙️ Applying deterministic rename ({len(deterministic)} file(s))")
+            state["fallback_used"] = True
             return deterministic
     return changes
 
@@ -186,10 +234,12 @@ def _apply_deterministic_removal(state: RefactorState,
         )
         if deterministic:
             logger.info(f"⚙️ Applying deterministic removal ({len(deterministic)} file(s))")
+            state["fallback_used"] = True
             return deterministic
     return changes
 
 
+@_timed_node("GENERATE")
 async def generate_node(state: RefactorState) -> Dict[str, Any]:
     """Generate AST-aware edits based on the plan and affected files."""
     logger.info("🟢 [Workflow] Entering GENERATE node")
@@ -223,6 +273,7 @@ async def generate_node(state: RefactorState) -> Dict[str, Any]:
     return {"proposed_changes": changes}
 
 
+@_timed_node("VALIDATE")
 async def validate_node(state: RefactorState) -> Dict[str, Any]:
     """Run the 6-gate validation pipeline + objective-coverage check."""
     logger.info(f"🟢 [Workflow] Entering VALIDATE node (Iteration {state['iteration_count']})")
@@ -300,6 +351,7 @@ def check_objective_coverage(state: RefactorState, changes: List[Dict[str, str]]
     return ""
 
 
+@_timed_node("REPAIR")
 async def repair_node(state: RefactorState) -> Dict[str, Any]:
     """Fix issues identified by the validation pipeline."""
     logger.info("🟢 [Workflow] Entering REPAIR node")
@@ -330,6 +382,7 @@ async def repair_node(state: RefactorState) -> Dict[str, Any]:
     return {"proposed_changes": changes}
 
 
+@_timed_node("COMMIT")
 async def commit_node(state: RefactorState) -> Dict[str, Any]:
     """Apply the changes and update the graph."""
     logger.info("🟢 [Workflow] Entering COMMIT node")
@@ -361,6 +414,7 @@ async def commit_node(state: RefactorState) -> Dict[str, Any]:
     
     return {"flight_record_id": record_id}
 
+@_timed_node("ABORT")
 async def abort_node(state: RefactorState) -> Dict[str, Any]:
     """Record a refused change (audit trail for why nothing was committed)."""
     logger.info("🚫 [Workflow] Entering ABORT node")
@@ -404,6 +458,47 @@ def validation_gate(state: RefactorState) -> str:
         
     logger.warning("⚠️ Validation Failed. Proceeding to REPAIR.")
     return "repair"
+
+
+async def run_refactor(state: RefactorState, run_id: str = None) -> Dict[str, Any]:
+    """Run the workflow with telemetry: node timings, tokens, cost, outcome.
+
+    Records one run_metrics row per invocation. Returns the final state.
+    """
+    import time
+    import uuid as _uuid
+    from app.core.telemetry import Telemetry
+    from app.core.llm_router import telemetry_begin, telemetry_end
+
+    run_id = run_id or state.get("run_id") or _uuid.uuid4().hex[:12]
+    state.setdefault("node_timings", {})
+    state.setdefault("fallback_used", False)
+    state.setdefault("ticket_id", None)
+
+    telemetry_begin(run_id)
+    t0 = time.perf_counter()
+    workflow = build_workflow()
+    final_state = await workflow.ainvoke(state)
+    duration_ms = (time.perf_counter() - t0) * 1000
+    usage = telemetry_end()
+
+    try:
+        Telemetry().record_run(
+            run_id=run_id,
+            objective=final_state.get("objective", ""),
+            outcome="committed" if final_state.get("validation_passed") else "aborted",
+            duration_ms=duration_ms,
+            iterations=final_state.get("iteration_count", 0),
+            tokens_by_model=usage.get("tokens_by_model", {}),
+            requests=usage.get("requests", 0),
+            node_timings=final_state.get("node_timings", {}),
+            gates=(final_state.get("validation_report") or {}).get("gates"),
+            fallback_used=bool(final_state.get("fallback_used")),
+        )
+    except Exception:
+        logger.warning("Telemetry recording failed", exc_info=True)
+
+    return final_state
 
 
 # ─────────────────────────────────────────────
