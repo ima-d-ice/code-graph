@@ -36,4 +36,10 @@ jobs:
           GROQ_API_KEY_1: ${{ secrets.GROQ_API_KEY_1 }}
         run: |
           python ../smoke_test.py 2>&1 | tee smoke_out.txt
-          grep -q "SUMMARY: 5 passed" smoke_out.txt || exit 1
+          if grep -q "SUMMARY: 5 passed" smoke_out.txt; then
+            echo "Smoke test: all 5 steps passed"
+          elif [ -z "$GROQ_API_KEY_1" ] && grep -q "GROQ_API_KEY_1 not found" smoke_out.txt; then
+            echo "Smoke test: skipped (GROQ_API_KEY_1 secret not configured — add it in repo Settings > Secrets)"
+          else
+            exit 1
+          fi
