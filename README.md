@@ -87,6 +87,26 @@ python ../examples/run_benchmark.py --tasks rename,remove_dead \
 Expected output: scoreboard (resolution rate, cost), blast accuracy, and a
 moat verdict (`GRAPH WINS` / `NO ADVANTAGE DETECTED`). See `METRICS.md`.
 
+### First run (n=1, gpt-oss-120b pool, 2026-08-02)
+
+| Task | Size | Mode | Resolution | Blast found/expected |
+|---|---|---|---|---|
+| rename | 10 | graph | 100% | 9/9 |
+| rename | 10 | grep | 100% | 9/9 |
+| rename | 50 | graph | 100% | 41/41 |
+| rename | 50 | grep | **0%** | 34/41 |
+| remove_dead | 10 | graph | 100% | 1/1 |
+| remove_dead | 10 | grep | 100% | 1/1 |
+| remove_dead | 50 | graph | 100% | 1/1 |
+| remove_dead | 50 | grep | 100% | 1/1 |
+
+**Moat verdict: GRAPH WINS** — resolution 100% vs 75%, blast accuracy 1.0 vs
+0.957. At scale (50 call sites) the prompt-only path missed 7 call sites and
+failed the gates; the graph-first path never missed. Median refactor cost
+measured: ~$0.004 (remove) to ~$0.008 (rename@50).
+
+> Run your own to keep this honest — `--trials 3` for confidence.
+
 ## Gardener demo (dead-code hunt, autonomous)
 
 ```bash
