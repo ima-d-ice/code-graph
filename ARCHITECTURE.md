@@ -92,6 +92,39 @@ through well-defined interfaces.
 - **The digital twin never goes stale**: every commit re-indexes the graph.
 - **Fail-open safety**: guard and graph checks degrade gracefully (grep fallback) so the
   pipeline stays usable when infrastructure is down.
+- **No change without evidence**: every COMMIT/ABORT writes a flight record.
+- **Improvements are measurable**: every run writes telemetry; health snapshots are
+  persisted so trends prove the gardener moves the codebase, not vibes.
+
+## Observability & evidence layers
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                        EVIDENCE LAYER (Phase 2)                           │
+│  FlightRecorder (SQLite audit)  ·  Telemetry (tokens/cost/timings)       │
+│  CodeHealth (score, debt, hotspots, A–E rating) · health_snapshots       │
+│  RefactorBench scoreboard (resolution rate, blast accuracy, moat A/B)    │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+- **`app/core/flight_recorder.py`** — append-only audit: objective → blast radius →
+  plan → diffs → gates → graph delta. `GET /changes`, `GET /changes/{id}`.
+- **`app/core/telemetry.py`** — per-run metrics: node timings, per-model token
+  counts (model-reported usage), estimated cost (Groq pricing table), repair
+  iterations, deterministic-fallback usage. `GET /metrics*`.
+- **`app/core/code_health.py`** — SonarQube/CodeScene metric family: complexity
+  stats, hotspots (complexity × fan-in), dead-code density, tech-debt ratio,
+  maintainability rating A–E, composite health score 0–10. Snapshot + trend.
+- **`app/core/benchmark.py`** — RefactorBench store: task defs (rename, dead-code
+  removal), gold verification, scoreboard + graph-vs-grep moat A/B.
+- **`app/core/progress.py`** — real-time workflow progress to `/ws/refactor`.
+
+## Production surface
+
+- Dockerfile + docker-compose (api + Neo4j, healthchecks, volumes).
+- Structured JSON logging (one object per line).
+- Optional `X-API-Key` auth + per-IP rate limiting (env-driven).
+- Prometheus text-format export on `/metrics/prometheus` (zero deps).
 
 ## Roadmap mapping
 
@@ -99,6 +132,6 @@ through well-defined interfaces.
 |---|---|
 | 0 | Vision docs, CI, tests (this document) |
 | 1 | Graph-first DISCOVER, graph integrity gate, semantic query API, freshness endpoint |
-| 2 | Analytics daemon (dead code/cycles/god functions), ticket generator, governed executor |
-| 3 | Behavior-preservation gate, semantic diff verification, flight recorder |
-| 4 | Convention learning, policy engine, cross-repo migration, frontend |
+| 2 | Gardener (dead-code tickets + auto-execution), flight recorder, metrics, health, RefactorBench |
+| 3 | Behavior-preservation gate, semantic diff verification, convention learning |
+| 4 | Policy engine, cross-repo migration, frontend/dashboard |
