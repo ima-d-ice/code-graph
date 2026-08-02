@@ -106,7 +106,6 @@ async def run_trial(task: str, size: int, mode: str, trial: int) -> dict:
     from app.core.graph_workflow import run_refactor
     from app.core.telemetry import estimate_cost
     from app.core.benchmark import BenchmarkStore, TASKS, expected_blast_radius
-    from app.core.llm_router import telemetry_begin, telemetry_end
 
     generate(DEMO_REPO, size, 0.8)
     try:
@@ -150,11 +149,10 @@ async def run_trial(task: str, size: int, mode: str, trial: int) -> dict:
         "discovery_mode": mode,
     }
 
-    telemetry_begin(f"bench-{task}-{size}-{mode}-{trial}")
     t0 = time.perf_counter()
     final_state = await run_refactor(state)
     duration_ms = (time.perf_counter() - t0) * 1000
-    usage = telemetry_end()
+    usage = final_state.get("_usage", {})
 
     passed = bool(final_state.get("validation_passed"))
     remaining = (

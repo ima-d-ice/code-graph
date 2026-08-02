@@ -481,6 +481,7 @@ async def run_refactor(state: RefactorState, run_id: str = None) -> Dict[str, An
     final_state = await workflow.ainvoke(state)
     duration_ms = (time.perf_counter() - t0) * 1000
     usage = telemetry_end()
+    final_state["_usage"] = usage
 
     try:
         Telemetry().record_run(

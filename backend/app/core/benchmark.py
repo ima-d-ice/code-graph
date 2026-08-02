@@ -153,12 +153,11 @@ class BenchmarkStore:
         out = []
         for r in rows:
             d = dict(r)
-            expected = d.pop("avg_expected") or 0
-            found = d.pop("avg_found") or 0
+            expected = d.get("avg_expected") or 0
+            found = d.get("avg_found") or 0
             d["blast_accuracy"] = (
                 round(min(found / expected, 1.0), 3) if expected else None
             )
-            d["overfound"] = found > expected
             out.append(d)
         return out
 
