@@ -75,7 +75,8 @@ def ingest_warm(project_root: str, changed_files: List[str]):
             
         except Exception as e:
             logger.error(f"Failed to update graph for {file}: {e}")
-            
+
+    neo4j.record_ingest(mode="warm")
     neo4j.close()
     logger.info("✅ Warm ingest complete")
 

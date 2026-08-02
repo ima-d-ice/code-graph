@@ -18,7 +18,7 @@ def _validate(contents):
 def test_report_structure():
     report = _validate("def f():\n    return 1\n")
     assert set(report["gates"].keys()) == {
-        "syntax", "imports", "types", "tests", "security"
+        "syntax", "imports", "types", "tests", "security", "graph"
     }
     assert report["overall"] in ("PASS", "FAIL")
 

@@ -62,18 +62,34 @@ async def plan_node(state: RefactorState) -> Dict[str, Any]:
 
 
 async def discover_node(state: RefactorState) -> Dict[str, Any]:
-    """Find all affected files using the graph."""
+    """Find all affected files using the graph. Graph-first, grep-second."""
     logger.info("🟢 [Workflow] Entering DISCOVER node")
     from app.agents.planner_agent import PlannerAgent
     from app.tools.file_tools import read_file
-    
-    # Use planner agent's discovery tools
+
+    # Use planner agent's discovery tools (graph blast radius w/ grep fallback)
     agent = PlannerAgent(state["project_root"])
     impact = agent.analyze_impact(state["function_name"])
-    
+
+    # Graph-first enrichment: pull the subgraph neighborhood around the symbol
+    graph_context = impact
+    try:
+        from app.services.neo4j_service import Neo4jService
+        neo4j = Neo4jService()
+        subgraph = neo4j.get_subgraph(state["function_name"])
+        neo4j.close()
+        graph_context["subgraph"] = subgraph
+        logger.info(
+            f"🕸️ Subgraph: {len(subgraph.get('affected_files', []))} files, "
+            f"{len(subgraph.get('edges', []))} edges, "
+            f"{len(subgraph.get('direct_callers', []))} direct callers"
+        )
+    except Exception as e:
+        logger.warning(f"Subgraph enrichment unavailable ({e}); proceeding with impact only")
+
     # Read all affected files
     affected_files = {}
-    
+
     # Always include the trigger file
     trigger_content = read_file(state["file_name"], state["project_root"])
     if not trigger_content.startswith("Error"):
@@ -85,7 +101,7 @@ async def discover_node(state: RefactorState) -> Dict[str, Any]:
             else:
                 raw_lines.append(line)
         affected_files[state["file_name"]] = "\n".join(raw_lines)
-        
+
     for file_info in impact.get("affected_files", []):
         f = file_info if isinstance(file_info, str) else file_info.get("file", "")
         if f and f not in affected_files:
@@ -98,14 +114,66 @@ async def discover_node(state: RefactorState) -> Dict[str, Any]:
                     else:
                         raw_lines.append(line)
                 affected_files[f] = "\n".join(raw_lines)
-                
-    return {"affected_files": affected_files, "graph_context": impact}
+
+    # Graph-first metric: how much context did we spare the LLM?
+    total_tokens_affected = sum(len(c) // 4 for c in affected_files.values())
+    try:
+        import os
+        repo_bytes = sum(
+            os.path.getsize(os.path.join(root, f))
+            for root, _, files in os.walk(state["project_root"])
+            for f in files
+        )
+    except Exception:
+        repo_bytes = 0
+    logger.info(
+        f"📐 Graph-first context: {len(affected_files)} file(s), ~{total_tokens_affected} "
+        f"estimated tokens (repo {repo_bytes} bytes total)"
+    )
+
+    return {"affected_files": affected_files, "graph_context": graph_context}
+
+
+def _trigger_change_valid(state: RefactorState, changes: List[Dict[str, str]]) -> bool:
+    """True if the trigger file is changed and the target symbol was removed
+    from its definitions (i.e. the rename actually happened)."""
+    import os
+    from app.core.rename_propagation import defined_symbols
+    tc = [c for c in changes if c["file_path"] == state.get("file_name")]
+    if not tc:
+        return False
+    symbol = state.get("function_name") or ""
+    if not symbol:
+        return True
+    try:
+        old_path = os.path.join(state["project_root"], state["file_name"])
+        with open(old_path, "r", encoding="utf-8", errors="replace") as fh:
+            old_defs = defined_symbols(fh.read())
+        return symbol not in defined_symbols(tc[0]["content"])
+    except OSError:
+        return False
+
+
+def _apply_deterministic_rename(state: RefactorState,
+                                changes: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Override unusable changes with the deterministic objective-driven rename."""
+    if not changes or not _trigger_change_valid(state, changes):
+        from app.core.rename_propagation import apply_objective_rename
+        deterministic = apply_objective_rename(
+            state["objective"], state["file_name"],
+            state["project_root"], state["affected_files"],
+        )
+        if deterministic:
+            logger.info(f"⚙️ Applying deterministic rename ({len(deterministic)} file(s))")
+            return deterministic
+    return changes
 
 
 async def generate_node(state: RefactorState) -> Dict[str, Any]:
     """Generate AST-aware edits based on the plan and affected files."""
     logger.info("🟢 [Workflow] Entering GENERATE node")
     from app.agents.executor_agent import ExecutorAgent
+    from app.core.rename_propagation import propagate_renames
     
     agent = ExecutorAgent(state["project_root"])
     changes = await agent.run(
@@ -114,17 +182,53 @@ async def generate_node(state: RefactorState) -> Dict[str, Any]:
         state["affected_files"], 
         state["graph_context"]
     )
+
+    # Graph-native guarantee: if the executor's trigger-file change didn't
+    # actually perform the rename, override with the deterministic
+    # objective-driven rename (AST-semantic, verified by the diff engine).
+    changes = _apply_deterministic_rename(state, changes)
+
+    # Graph-native guarantee: deterministically propagate every rename the LLM
+    # missed across the blast radius found during DISCOVER.
+    if changes:
+        changes = propagate_renames(changes, state["project_root"], state["affected_files"])
+        logger.info(f"🔄 After propagation: {len(changes)} change(s)")
     
     return {"proposed_changes": changes}
 
 
 async def validate_node(state: RefactorState) -> Dict[str, Any]:
-    """Run the 5-gate validation pipeline."""
+    """Run the 6-gate validation pipeline + objective-coverage check."""
     logger.info(f"🟢 [Workflow] Entering VALIDATE node (Iteration {state['iteration_count']})")
     from app.agents.critic_agent import CriticAgent
-    
+
+    changes = state.get("proposed_changes") or []
+
+    # Objective-coverage pre-check: a rename must actually rename.
+    # Deterministic — does not depend on the LLM claiming success.
+    coverage_error = check_objective_coverage(state, changes)
+    if coverage_error:
+        report = {
+            "overall": "FAIL",
+            "coverage": coverage_error,
+            "gates": {
+                "syntax": {"status": "SKIP", "details": ""},
+                "imports": {"status": "SKIP", "details": ""},
+                "types": {"status": "SKIP", "details": ""},
+                "tests": {"status": "SKIP", "details": ""},
+                "security": {"status": "SKIP", "details": ""},
+                "graph": {"status": "FAIL", "details": f"Objective not achieved: {coverage_error}"},
+            },
+        }
+        logger.warning(f"🚫 Objective coverage check failed: {coverage_error}")
+        return {
+            "validation_report": report,
+            "validation_passed": False,
+            "iteration_count": state["iteration_count"] + 1
+        }
+
     agent = CriticAgent(state["project_root"])
-    report = agent.validate(state["proposed_changes"])
+    report = agent.validate(changes)
     
     return {
         "validation_report": report,
@@ -133,10 +237,48 @@ async def validate_node(state: RefactorState) -> Dict[str, Any]:
     }
 
 
+def check_objective_coverage(state: RefactorState, changes: List[Dict[str, str]]) -> str:
+    """
+    Verify the refactor objective was actually achieved on the trigger file:
+    the trigger file must be changed, and the target symbol must be gone from
+    its definitions (a rename that removed nothing is a no-op).
+    """
+    import os
+    trigger = state.get("file_name") or ""
+    symbol = state.get("function_name") or ""
+
+    if not changes:
+        return "No changes produced."
+
+    if trigger:
+        trigger_changes = [c for c in changes if c["file_path"] == trigger]
+        if not trigger_changes:
+            return f"Trigger file '{trigger}' was not changed."
+        new_content = trigger_changes[0]["content"]
+
+        if symbol:
+            old_path = os.path.join(state["project_root"], trigger)
+            try:
+                with open(old_path, "r", encoding="utf-8", errors="replace") as fh:
+                    old_content = fh.read()
+            except OSError:
+                old_content = ""
+            if old_content.strip() == new_content.strip():
+                return f"Trigger file '{trigger}' content is unchanged (no-op)."
+
+            from app.core.rename_propagation import defined_symbols
+            old_defs = defined_symbols(old_content)
+            new_defs = defined_symbols(new_content)
+            if symbol in old_defs and symbol in new_defs:
+                return f"Symbol '{symbol}' still defined in '{trigger}' (rename not applied)."
+    return ""
+
+
 async def repair_node(state: RefactorState) -> Dict[str, Any]:
     """Fix issues identified by the validation pipeline."""
     logger.info("🟢 [Workflow] Entering REPAIR node")
     from app.agents.repair_agent import RepairAgent
+    from app.core.rename_propagation import propagate_renames
     
     agent = RepairAgent(state["project_root"])
     changes = await agent.run(
@@ -144,6 +286,15 @@ async def repair_node(state: RefactorState) -> Dict[str, Any]:
         state["validation_report"],
         state["affected_files"]
     )
+
+    # If the repair LLM also failed to touch the trigger file, fall back to
+    # the deterministic objective-driven rename — the graph guarantees the
+    # outcome even when the LLM cannot.
+    changes = _apply_deterministic_rename(state, changes)
+
+    # Keep the graph-native guarantee through the repair loop as well
+    if changes:
+        changes = propagate_renames(changes, state["project_root"], state["affected_files"])
     
     return {"proposed_changes": changes}
 

@@ -64,6 +64,7 @@ def ingest_cold(folder_path: str):
     stats = neo4j.get_stats()
     logger.info(f"📊 Graph Stats: {stats}")
 
+    neo4j.record_ingest(mode="cold")
     neo4j.close()
     logger.info("✅ Cold ingestion complete")
 

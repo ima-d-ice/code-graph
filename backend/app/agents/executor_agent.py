@@ -26,8 +26,8 @@ class ExecutorAgent:
         self.router = LLMRouter()
         self.registry = ToolRegistry()
 
-        register_file_tools(self.registry, project_root)
-        register_graph_tools(self.registry)
+        register_file_tools(self.registry, project_root, write_access=False)
+        register_graph_tools(self.registry, self.project_root)
 
         self.loop = AgentLoop(self.router, self.registry, max_turns=15)
 
@@ -36,9 +36,11 @@ class ExecutorAgent:
                   graph_context: Dict[str, Any]) -> List[Dict[str, str]]:
         """Generate code changes based on the plan."""
 
-        # Build context
+        # Build context (bounded: cap per-file content to keep within model context)
         context_str = f"OBJECTIVE:\n{objective}\n\nPLAN:\n{json.dumps(plan, indent=2)}\n\nAFFECTED FILES:\n"
         for path, content in affected_files.items():
+            if len(content) > 6000:
+                content = content[:6000] + "\n... (truncated)"
             context_str += f"--- {path} ---\n{content}\n\n"
 
         system_prompt = """You are an expert refactoring engine.

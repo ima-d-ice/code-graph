@@ -142,8 +142,13 @@ def edit_file(file_path: str, transform: str, args: Dict[str, Any], project_root
         return f"Error applying transform '{transform}': {e}"
 
 
-def register_file_tools(registry, project_root: str):
-    """Register all file tools with the tool registry."""
+def register_file_tools(registry, project_root: str, write_access: bool = True):
+    """Register all file tools with the tool registry.
+
+    write_access=False registers only read-only tools (read_file, glob, grep)
+    so agents in the VALIDATE-before-COMMIT pipeline cannot mutate the real
+    project mid-loop — writes happen only in the COMMIT node.
+    """
     from app.core.tool_registry import PermissionMode
     
     registry.register(
@@ -173,6 +178,8 @@ def register_file_tools(registry, project_root: str):
         },
         required_permission=PermissionMode.EXECUTE,
         handler=lambda file_path, content: write_file(file_path, content, project_root)
+        if write_access
+        else "write_file is disabled in the validation pipeline — return changes to COMMIT instead."
     )
     
     registry.register(
@@ -218,4 +225,6 @@ def register_file_tools(registry, project_root: str):
         },
         required_permission=PermissionMode.EXECUTE,
         handler=lambda file_path, transform, args: edit_file(file_path, transform, args, project_root)
+        if write_access
+        else "edit_file is disabled in the validation pipeline — return changes to COMMIT instead."
     )

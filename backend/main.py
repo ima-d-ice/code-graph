@@ -195,6 +195,100 @@ def get_graph_data():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/graph/stats")
+def graph_stats():
+    """
+    Graph statistics + digital twin freshness (last ingest).
+    """
+    try:
+        neo4j = Neo4jService()
+        stats = neo4j.get_stats()
+        freshness = neo4j.get_freshness()
+        neo4j.close()
+        return {"stats": stats, "freshness": freshness.get("last_ingested_at"),
+                "ingest_mode": freshness.get("mode")}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/analyze/symbol/{symbol}")
+def analyze_symbol(symbol: str):
+    """
+    Full subgraph neighborhood around a symbol: blast radius, direct callers,
+    callees, mutators, readers, edges. Falls back to grep when Neo4j is down.
+    """
+    try:
+        project_root = get_project_root()
+        from app.tools.graph_tools import impact_analysis
+        from app.services.neo4j_service import Neo4jService
+        import json
+
+        neo4j = None
+        try:
+            neo4j = Neo4jService()
+            subgraph = neo4j.get_subgraph(symbol)
+            subgraph["source"] = "graph"
+        except Exception:
+            subgraph = json.loads(impact_analysis(symbol, project_root))
+            subgraph.setdefault("edges", [])
+        finally:
+            try:
+                if neo4j:
+                    neo4j.close()
+            except Exception:
+                pass
+        return subgraph
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/analyze/blast/{symbol}")
+def analyze_blast(symbol: str):
+    """
+    Blast radius of changing a symbol (graph-first, grep fallback).
+    """
+    try:
+        project_root = get_project_root()
+        from app.agents.planner_agent import PlannerAgent
+        agent = PlannerAgent(project_root)
+        return agent.analyze_impact(symbol)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/health")
+def health_check():
+    """
+    Service health: Neo4j connectivity + graph freshness.
+    """
+    from datetime import datetime, timezone
+    health = {
+        "status": "ok",
+        "neo4j": "down",
+        "last_ingested_at": None,
+        "nodes": 0,
+        "relationships": 0,
+    }
+    try:
+        neo4j = Neo4jService()
+        stats = neo4j.get_stats()
+        freshness = neo4j.get_freshness()
+        neo4j.close()
+        health["neo4j"] = "up"
+        health["nodes"] = (
+            stats.get("modules", 0) + stats.get("classes", 0)
+            + stats.get("functions", 0) + stats.get("variables", 0)
+            + stats.get("files", 0)
+        )
+        health["relationships"] = stats.get("edges", 0)
+        health["last_ingested_at"] = freshness.get("last_ingested_at")
+    except Exception as e:
+        health["status"] = "degraded"
+        health["neo4j"] = f"down ({e})"
+    health["timestamp"] = datetime.now(timezone.utc).isoformat()
+    return health
+
+
 # WebSocket for streaming progress (MVP placeholder)
 @app.websocket("/ws/refactor")
 async def websocket_endpoint(websocket: WebSocket):

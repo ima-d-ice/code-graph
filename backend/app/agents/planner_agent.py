@@ -22,8 +22,8 @@ class PlannerAgent:
         self.registry = ToolRegistry()
         
         # Register read-only tools
-        register_file_tools(self.registry, project_root)
-        register_graph_tools(self.registry)
+        register_file_tools(self.registry, project_root, write_access=False)
+        register_graph_tools(self.registry, self.project_root)
         
         self.loop = AgentLoop(self.router, self.registry, max_turns=10)
 
@@ -68,10 +68,17 @@ Once you have explored sufficiently, return a JSON object with your plan:
         return {"plan": {"steps": [text], "files_to_modify": [file_name]}}
 
     def analyze_impact(self, symbol: str) -> Dict[str, Any]:
-        """Convenience method to directly run impact analysis."""
-        from app.tools.graph_tools import impact_analysis
+        """Convenience method to directly run impact analysis (graph-first)."""
         try:
-            res = impact_analysis(symbol)
+            from app.tools.graph_tools import impact_analysis
+            res = impact_analysis(symbol, self.project_root)
             return json.loads(res)
-        except Exception:
-            return {"affected_files": []}
+        except Exception as e:
+            # Graph-first, grep-second: fall back to on-disk discovery
+            logger.warning(f"Impact analysis failed ({e}); using grep fallback")
+            try:
+                from app.tools.graph_tools import grep_fallback_impact
+                return json.loads(grep_fallback_impact(symbol, self.project_root))
+            except Exception as e2:
+                logger.error(f"Grep fallback failed: {e2}")
+                return {"affected_files": []}

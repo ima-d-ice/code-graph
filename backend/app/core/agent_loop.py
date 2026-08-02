@@ -161,7 +161,8 @@ class AgentLoop:
         # Walk the provider chain in preference order (best tier first).
         # Some models (e.g. gpt-oss-120b) can emit malformed tool-call JSON —
         # on failure we record it against that provider and fall to the next tier.
-        providers = self.llm.available_providers(task_type)
+        # groq/compound* cannot do tool calling, so exclude them when tools are bound.
+        providers = self.llm.available_providers(task_type, require_tool_calling=bool(tools))
         if not providers:
             raise RuntimeError("No available LLM providers")
 

@@ -158,6 +158,8 @@ GROQ_MODELS = [
 # Which models to use for each task type (ordered by preference)
 # NOTE: groq/compound and compound-mini do NOT support tool calling —
 # only use them for no-tool tasks (RAG synthesis, quick search).
+NO_TOOL_CALLING_MODELS = {"groq/compound", "groq/compound-mini"}
+
 TASK_MODEL_MAP: Dict[str, List[str]] = {
     TaskType.PLANNING: [
         "openai/gpt-oss-120b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant",
@@ -172,10 +174,10 @@ TASK_MODEL_MAP: Dict[str, List[str]] = {
         "llama-3.1-8b-instant", "groq/compound-mini",
     ],
     TaskType.QUICK_SEARCH: [
-        "groq/compound-mini", "llama-3.1-8b-instant",
+        "llama-3.1-8b-instant", "groq/compound-mini",
     ],
     TaskType.SUMMARIZE: [
-        "groq/compound", "groq/compound-mini", "llama-3.1-8b-instant",
+        "llama-3.1-8b-instant", "groq/compound", "groq/compound-mini",
     ],
     TaskType.SAFETY: [
         "meta-llama/llama-prompt-guard-2-86m",
@@ -294,7 +296,8 @@ class LLMRouter:
         return self._select_provider(task_type, preferred_model)
 
     def available_providers(self, task_type: str,
-                            preferred_model: Optional[str] = None) -> List[ProviderProfile]:
+                            preferred_model: Optional[str] = None,
+                            require_tool_calling: bool = False) -> List[ProviderProfile]:
         """
         All available providers for a task, in preference order (best tier first,
         least-loaded within each tier). Used for tool-calling retry loops.
@@ -303,11 +306,14 @@ class LLMRouter:
         if preferred_model:
             models = [preferred_model] + [m for m in models if m != preferred_model]
 
+        def supports_tools(p: ProviderProfile) -> bool:
+            return not require_tool_calling or p.model not in NO_TOOL_CALLING_MODELS
+
         ordered: List[ProviderProfile] = []
         seen = set()
         for model in models:
             candidates = sorted(
-                (p for p in self.providers if p.model == model and p.is_available()),
+                (p for p in self.providers if p.model == model and p.is_available() and supports_tools(p)),
                 key=lambda p: p.load,
             )
             for p in candidates:
@@ -315,7 +321,8 @@ class LLMRouter:
                 seen.add(id(p))
 
         fallback = sorted(
-            (p for p in self.providers if id(p) not in seen and p.is_available()),
+            (p for p in self.providers
+             if id(p) not in seen and p.is_available() and supports_tools(p)),
             key=lambda p: p.load,
         )
         return ordered + fallback
@@ -427,13 +434,16 @@ class LLMRouter:
         """
         Classify a prompt with llama-prompt-guard-2-86m (prompt injection gate).
 
-        Returns the raw model verdict (e.g. "prompt_attack", "benign", ...),
-        or None if the guard model is unavailable / the call fails
-        (fail-open: don't block the pipeline on guard infrastructure).
+        The guard model has a small context window, so the prompt is truncated
+        to a bounded window before classification (fail-open on any error).
         """
         provider = self._select_provider(TaskType.SAFETY)
         if not provider:
             return None
+
+        # Guard only needs a bounded window to detect an injection
+        if len(prompt) > 4000:
+            prompt = prompt[:4000]
 
         try:
             client = self._build_client(provider)

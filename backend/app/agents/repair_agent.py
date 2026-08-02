@@ -25,8 +25,8 @@ class RepairAgent:
         self.router = LLMRouter()
         self.registry = ToolRegistry()
 
-        register_file_tools(self.registry, project_root)
-        register_graph_tools(self.registry)
+        register_file_tools(self.registry, project_root, write_access=False)
+        register_graph_tools(self.registry, self.project_root)
 
         self.loop = AgentLoop(self.router, self.registry, max_turns=15)
 
@@ -35,15 +35,20 @@ class RepairAgent:
                   affected_files: Dict[str, str]) -> List[Dict[str, str]]:
         """Attempt to fix errors based on validation report."""
 
-        # Build context
+        # Build context (bounded: cap content to keep within model context)
         context_str = "PREVIOUS PROPOSED CHANGES:\n"
-        for change in proposed_changes:
-            context_str += f"--- {change['file_path']} ---\n{change['content']}\n\n"
+        for change in proposed_changes[:5]:
+            content = change["content"]
+            if len(content) > 6000:
+                content = content[:6000] + "\n... (truncated)"
+            context_str += f"--- {change['file_path']} ---\n{content}\n\n"
 
-        context_str += f"VALIDATION ERRORS:\n{json.dumps(validation_report, indent=2)}\n\n"
+        context_str += f"VALIDATION ERRORS:\n{json.dumps(validation_report, indent=2)[:8000]}\n\n"
 
         context_str += "ORIGINAL AFFECTED FILES:\n"
-        for path, content in affected_files.items():
+        for path, content in list(affected_files.items())[:5]:
+            if len(content) > 4000:
+                content = content[:4000] + "\n... (truncated)"
             context_str += f"--- {path} ---\n{content}\n\n"
 
         system_prompt = """You are an expert repair agent.

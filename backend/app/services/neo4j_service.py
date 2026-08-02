@@ -288,6 +288,122 @@ class Neo4jService:
             result = session.run(query, symbol=symbol, max_depth=max_depth)
             return [dict(record) for record in result]
 
+    def get_direct_callers(self, symbol: str) -> List[Dict]:
+        """All functions/classes that call the given symbol directly."""
+        query = """
+        MATCH (caller)-[:CALLS]->(target {name: $symbol})
+        RETURN caller.name as name, caller.file as file, labels(caller) as labels
+        """
+        with self._session() as session:
+            result = session.run(query, symbol=symbol)
+            return [
+                {
+                    "name": record["name"],
+                    "file": record["file"],
+                    "type": record["labels"][0] if record["labels"] else "Unknown",
+                }
+                for record in result
+            ]
+
+    def symbol_exists(self, name: str) -> bool:
+        """True if any node with this name exists in the graph (digital twin)."""
+        query = """
+        MATCH (n {name: $name})
+        RETURN count(n) as cnt
+        """
+        with self._session() as session:
+            record = session.run(query, name=name).single()
+            return bool(record and record["cnt"])
+
+    def get_mutators(self, symbol: str) -> List[Dict]:
+        """All functions that MUTATE the given symbol."""
+        query = """
+        MATCH (fn:Function)-[:MUTATES]->(target {name: $symbol})
+        RETURN fn.name as name, fn.file as file
+        """
+        with self._session() as session:
+            result = session.run(query, symbol=symbol)
+            return [dict(record) for record in result]
+
+    def get_readers(self, symbol: str) -> List[Dict]:
+        """All functions that READ the given symbol."""
+        query = """
+        MATCH (fn:Function)-[:READS]->(target {name: $symbol})
+        RETURN fn.name as name, fn.file as file
+        """
+        with self._session() as session:
+            result = session.run(query, symbol=symbol)
+            return [dict(record) for record in result]
+
+    def get_subgraph(self, symbol: str, max_depth: int = 2) -> Dict[str, Any]:
+        """
+        Extract the full neighborhood subgraph around a symbol:
+        direct + transitive callers, callees, mutators, readers, importers,
+        inheritors — plus the raw edges for graph-first planning.
+        """
+        subgraph = {
+            "symbol": symbol,
+            "blast_radius": self.get_blast_radius(symbol),
+            "direct_callers": self.get_direct_callers(symbol),
+            "mutators": self.get_mutators(symbol),
+            "readers": self.get_readers(symbol),
+            "callees": [],
+            "edges": [],
+        }
+
+        # Callees: what does this symbol call?
+        query = """
+        MATCH (src {name: $symbol})-[:CALLS]->(callee)
+        RETURN callee.name as name, callee.file as file, labels(callee) as labels
+        """
+        with self._session() as session:
+            result = session.run(query, symbol=symbol)
+            subgraph["callees"] = [
+                {
+                    "name": record["name"],
+                    "file": record["file"],
+                    "type": record["labels"][0] if record["labels"] else "Unknown",
+                }
+                for record in result
+            ]
+
+        # Raw edges in the neighborhood (depth-limited path traversal).
+        # NOTE: Cypher does not allow parameters in variable-length bounds,
+        # so interpolate the (int, bounded) depth.
+        depth = int(max_depth)
+        query = f"""
+        MATCH path = (a)-[r]->(b)
+        WHERE a.name = $symbol OR b.name = $symbol
+           OR (a)-[:CALLS*1..{depth}]->({{name: $symbol}})
+           OR ({{name: $symbol}})-[:CALLS*1..{depth}]->(a)
+        RETURN DISTINCT a.name as source, labels(a) as s_label,
+                        b.name as target, labels(b) as t_label,
+                        type(r) as relationship
+        LIMIT 200
+        """
+        with self._session() as session:
+            result = session.run(query, symbol=symbol)
+            subgraph["edges"] = [
+                {
+                    "source": record["source"],
+                    "source_type": record["s_label"][0] if record["s_label"] else "Unknown",
+                    "target": record["target"],
+                    "target_type": record["t_label"][0] if record["t_label"] else "Unknown",
+                    "relationship": record["relationship"],
+                }
+                for record in result
+            ]
+
+        # Deduplicate affected files across all queries
+        files = set(subgraph["blast_radius"].get("affected_files", []))
+        for section in ("direct_callers", "callees", "mutators", "readers"):
+            for item in subgraph.get(section, []):
+                if item.get("file"):
+                    files.add(item["file"])
+        subgraph["affected_files"] = sorted(files)
+
+        return subgraph
+
     def get_blast_radius(self, symbol: str) -> Dict[str, Any]:
         """
         Compute the full blast radius of a symbol change.
@@ -489,6 +605,41 @@ class Neo4jService:
         with self._session() as session:
             session.run("MATCH (n) DETACH DELETE n")
         logger.info("🗑️ Neo4j database wiped")
+
+    def record_ingest(self, mode: str = "warm"):
+        """
+        Stamp the last-ingest time in a Meta node so the digital twin's
+        freshness is queryable (and the twin is provably not stale).
+        """
+        from datetime import datetime, timezone
+        query = """
+        MERGE (m:Meta {key: 'last_ingest'})
+        SET m.mode = $mode,
+            m.ingested_at = $timestamp
+        """
+        with self._session() as session:
+            session.run(
+                query,
+                mode=mode,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+
+    def get_freshness(self) -> Dict[str, Any]:
+        """Return ingest freshness and graph stats."""
+        try:
+            with self._session() as session:
+                result = session.run(
+                    "MATCH (m:Meta {key: 'last_ingest'}) RETURN m.ingested_at as ingested_at, m.mode as mode"
+                )
+                record = result.single()
+                meta = {
+                    "last_ingested_at": record["ingested_at"] if record else None,
+                    "mode": record["mode"] if record else None,
+                }
+            meta["stats"] = self.get_stats()
+            return meta
+        except Exception as e:
+            return {"last_ingested_at": None, "mode": None, "stats": {}, "error": str(e)}
 
     def get_stats(self) -> Dict[str, int]:
         """Return graph statistics."""
