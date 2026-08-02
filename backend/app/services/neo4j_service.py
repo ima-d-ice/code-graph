@@ -663,3 +663,55 @@ class Neo4jService:
                 record = result.single()
                 stats[key] = record["count"] if record else 0
         return stats
+
+    def get_orphan_functions(self) -> List[Dict]:
+        """Dead-code candidates: functions with no incoming CALLS edge.
+
+        A function nobody calls is a removal candidate. Note the safety net:
+        even if a reference exists that the graph missed, Gate 6 (graph
+        integrity) will fail the removal — gardener tickets never bypass gates.
+        """
+        query = """
+        MATCH (fn:Function)
+        WHERE NOT ()-[:CALLS]->(fn)
+        RETURN fn.name as name, fn.file as file, fn.simple_name as simple_name,
+               fn.complexity as complexity, fn.decorators as decorators,
+               COUNT { (fn)-[:CALLS]->() } as calls_out
+        ORDER BY fn.file, fn.name
+        """
+        with self._session() as session:
+            result = session.run(query)
+            return [
+                {
+                    "name": record["name"],
+                    "file": record["file"],
+                    "simple_name": record["simple_name"] or record["name"],
+                    "complexity": record["complexity"] or 1,
+                    "decorators": record["decorators"] or [],
+                    "calls_out": record["calls_out"] or 0,
+                }
+                for record in result
+            ]
+
+    def get_high_complexity_functions(self, threshold: int = 10) -> List[Dict]:
+        """Functions whose cyclomatic complexity exceeds the threshold."""
+        query = """
+        MATCH (fn:Function)
+        WHERE fn.complexity >= $threshold
+        RETURN fn.name as name, fn.file as file, fn.simple_name as simple_name,
+               fn.complexity as complexity,
+               COUNT { ()-[:CALLS]->(fn) } as caller_count
+        ORDER BY fn.complexity DESC
+        """
+        with self._session() as session:
+            result = session.run(query, threshold=threshold)
+            return [
+                {
+                    "name": record["name"],
+                    "file": record["file"],
+                    "simple_name": record["simple_name"] or record["name"],
+                    "complexity": record["complexity"] or 1,
+                    "caller_count": record["caller_count"] or 0,
+                }
+                for record in result
+            ]

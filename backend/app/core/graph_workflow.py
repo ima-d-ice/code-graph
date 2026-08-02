@@ -45,6 +45,12 @@ class RefactorState(TypedDict):
     max_iterations: int
     history: List[Dict[str, Any]]
 
+    # Gardener link (set when the workflow was launched from a ticket)
+    ticket_id: Optional[str] = None
+
+    # Populated by COMMIT/ABORT (flight recorder audit id)
+    flight_record_id: Optional[str] = None
+
 
 # ─────────────────────────────────────────────
 # Workflow Nodes
@@ -169,6 +175,21 @@ def _apply_deterministic_rename(state: RefactorState,
     return changes
 
 
+def _apply_deterministic_removal(state: RefactorState,
+                                 changes: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Override unusable changes with the deterministic dead-code removal."""
+    if not changes or not _trigger_change_valid(state, changes):
+        from app.core.rename_propagation import apply_objective_removal
+        deterministic = apply_objective_removal(
+            state["objective"], state["file_name"],
+            state["project_root"], state["affected_files"],
+        )
+        if deterministic:
+            logger.info(f"⚙️ Applying deterministic removal ({len(deterministic)} file(s))")
+            return deterministic
+    return changes
+
+
 async def generate_node(state: RefactorState) -> Dict[str, Any]:
     """Generate AST-aware edits based on the plan and affected files."""
     logger.info("🟢 [Workflow] Entering GENERATE node")
@@ -191,6 +212,7 @@ async def generate_node(state: RefactorState) -> Dict[str, Any]:
     # actually perform the rename, override with the deterministic
     # objective-driven rename (AST-semantic, verified by the diff engine).
     changes = _apply_deterministic_rename(state, changes)
+    changes = _apply_deterministic_removal(state, changes)
 
     # Graph-native guarantee: deterministically propagate every rename the LLM
     # missed across the blast radius found during DISCOVER.
@@ -299,6 +321,7 @@ async def repair_node(state: RefactorState) -> Dict[str, Any]:
     # the deterministic objective-driven rename — the graph guarantees the
     # outcome even when the LLM cannot.
     changes = _apply_deterministic_rename(state, changes)
+    changes = _apply_deterministic_removal(state, changes)
 
     # Keep the graph-native guarantee through the repair loop as well
     if changes:
@@ -311,10 +334,58 @@ async def commit_node(state: RefactorState) -> Dict[str, Any]:
     """Apply the changes and update the graph."""
     logger.info("🟢 [Workflow] Entering COMMIT node")
     from app.core.transaction import commit_refactor
+    from app.core.flight_recorder import FlightRecorder
     
+    before_stats = _graph_stats()
     commit_refactor(state["proposed_changes"], state["project_root"])
+    after_stats = _graph_stats()
+
+    graph_delta = {
+        "before": before_stats,
+        "after": after_stats,
+    }
+    if before_stats and after_stats:
+        delta = {}
+        for key in before_stats:
+            if isinstance(before_stats[key], int) and isinstance(after_stats.get(key), int):
+                delta[key] = after_stats[key] - before_stats[key]
+        graph_delta["delta"] = delta
+
+    recorder = FlightRecorder()
+    record_id = recorder.record(
+        state,
+        outcome="committed",
+        graph_stats=graph_delta,
+        ticket_id=state.get("ticket_id"),
+    )
     
-    return {}
+    return {"flight_record_id": record_id}
+
+async def abort_node(state: RefactorState) -> Dict[str, Any]:
+    """Record a refused change (audit trail for why nothing was committed)."""
+    logger.info("🚫 [Workflow] Entering ABORT node")
+    from app.core.flight_recorder import FlightRecorder
+    record_id = FlightRecorder().record(
+        state,
+        outcome="aborted",
+        graph_stats=_graph_stats(),
+        ticket_id=state.get("ticket_id"),
+    )
+    return {"flight_record_id": record_id}
+
+
+def _graph_stats() -> Optional[Dict[str, Any]]:
+    """Best-effort snapshot of graph statistics."""
+    try:
+        from app.services.neo4j_service import Neo4jService
+        neo4j = Neo4jService()
+        try:
+            return neo4j.get_stats()
+        finally:
+            neo4j.close()
+    except Exception:
+        logger.debug("Graph stats unavailable for flight record", exc_info=True)
+        return None
 
 
 # ─────────────────────────────────────────────
@@ -350,6 +421,7 @@ def build_workflow():
     workflow.add_node("VALIDATE", validate_node)
     workflow.add_node("REPAIR", repair_node)
     workflow.add_node("COMMIT", commit_node)
+    workflow.add_node("ABORT", abort_node)
 
     # Add edges
     workflow.add_edge(START, "PLAN")
@@ -364,11 +436,12 @@ def build_workflow():
         {
             "commit": "COMMIT",
             "repair": "REPAIR",
-            "abort": END
+            "abort": "ABORT"
         }
     )
     
     workflow.add_edge("REPAIR", "VALIDATE")
     workflow.add_edge("COMMIT", END)
+    workflow.add_edge("ABORT", END)
 
     return workflow.compile()

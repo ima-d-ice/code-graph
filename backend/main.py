@@ -256,6 +256,92 @@ def analyze_blast(symbol: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/changes")
+def list_changes(limit: int = 50, outcome: str = None):
+    """
+    Flight recorder: recent change records (metadata, newest first).
+    """
+    try:
+        from app.core.flight_recorder import FlightRecorder
+        return {"records": FlightRecorder().list_records(limit=limit, outcome=outcome)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/changes/{record_id}")
+def get_change(record_id: str):
+    """
+    Flight recorder: full audit record (objective -> plan -> diffs -> gates -> graph delta).
+    """
+    try:
+        from app.core.flight_recorder import FlightRecorder
+        record = FlightRecorder().get_record(record_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"No flight record {record_id}")
+        return record
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class GardenerScanRequest(BaseModel):
+    project_root: str = ""
+    complexity_threshold: int = 10
+    force: bool = False
+
+class GardenerRunRequest(BaseModel):
+    project_root: str = ""
+    max_tickets: int = 5
+
+
+@app.post("/gardener/scan")
+def gardener_scan(request: GardenerScanRequest):
+    """
+    Autonomous gardener: scan the digital twin for improvement tickets
+    (dead code, high complexity). Graph-evidence-first.
+    """
+    try:
+        from app.core.gardener import Gardener
+        project_root = request.project_root or get_project_root()
+        result = Gardener().scan(
+            project_root,
+            complexity_threshold=request.complexity_threshold,
+            force=request.force,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/gardener/run")
+async def gardener_run(request: GardenerRunRequest):
+    """
+    Autonomous gardener: auto-execute pending low-risk tickets through the
+    full 6-gate workflow. Every execution writes a flight record.
+    """
+    try:
+        from app.core.gardener import Gardener
+        project_root = request.project_root or get_project_root()
+        return await Gardener().run_pending(
+            project_root, max_tickets=request.max_tickets
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/gardener/tickets")
+def gardener_tickets(status: str = None):
+    """
+    Autonomous gardener: list all tickets (optionally filtered by status).
+    """
+    try:
+        from app.core.gardener import Gardener
+        return {"tickets": Gardener().list_tickets(status=status)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/health")
 def health_check():
     """

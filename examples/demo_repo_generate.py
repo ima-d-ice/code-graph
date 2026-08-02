@@ -42,15 +42,24 @@ def legacy_add(a, b):
 '''
 
 
-def _caller_source(n: int) -> str:
+def _caller_source(n: int, n_decoys: int = 0) -> str:
+    """Caller module {n}. For the first n_decoys callers, also reference a
+    decoy function so decoys are NOT dead code (keeps the gardener demo's
+    'decoys untouched' invariant meaningful)."""
+    decoy_import = ""
+    decoy_call = ""
+    if n <= n_decoys:
+        decoy_import = f"\nfrom decoys.decoy_{n:03d} import use_product_{n}"
+        decoy_call = f"\n    extra = use_product_{n}(x, y)"
     return f'''"""Caller module {n} - uses compute_sum."""
 
-from lib.utils import compute_sum, TWO, THRESHOLD
+from lib.utils import compute_sum, TWO, THRESHOLD{decoy_import}
 
 
 def use_sum_{n}(x, y):
     total = compute_sum(x, y)
-    return total + TWO
+    extra = 0{decoy_call}
+    return total + TWO + extra
 
 
 def check_threshold_{n}(value):
@@ -92,11 +101,12 @@ def generate(project_root: str, files: int = 10, callers_ratio: float = 0.8) -> 
         f.write(_utils_v2_source())
 
     n_callers = max(1, int(files * callers_ratio))
+    n_decoys = max(1, files - n_callers)
     for i in range(1, n_callers + 1):
         with open(os.path.join(callers_dir, f"caller_{i:03d}.py"), "w") as f:
-            f.write(_caller_source(i))
+            f.write(_caller_source(i, n_decoys))
 
-    for i in range(1, max(1, files - n_callers) + 1):
+    for i in range(1, n_decoys + 1):
         with open(os.path.join(decoys_dir, f"decoy_{i:03d}.py"), "w") as f:
             f.write(_decoy_source(i))
 
