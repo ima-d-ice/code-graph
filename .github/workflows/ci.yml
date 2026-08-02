@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install -r requirements.txt
+
+      - name: Unit tests
+        working-directory: backend
+        run: |
+          python -m pytest ../tests -v --tb=short
+
+      - name: Syntax check
+        working-directory: backend
+        run: python -m py_compile main.py ingest.py
+
+      - name: Smoke test (offline steps)
+        working-directory: backend
+        env:
+          GROQ_API_KEY_1: ${{ secrets.GROQ_API_KEY_1 }}
+        run: |
+          python ../smoke_test.py 2>&1 | tee smoke_out.txt
+          grep -q "SUMMARY: 5 passed" smoke_out.txt || exit 1
