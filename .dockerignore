@@ -1,0 +1,13 @@
+# Local artifacts
+__pycache__/
+*.pyc
+.env
+backend/.env
+backend/data/
+backend/chroma_db/
+examples/demo_repo/
+.git/
+.github/
+tests/
+*.md
+.DS_Store

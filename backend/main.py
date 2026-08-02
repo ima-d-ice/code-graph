@@ -1,6 +1,10 @@
+import json
 import logging
 import os
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+import time
+from collections import defaultdict
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -13,8 +17,32 @@ from app.services.rag_services import HybridRAG
 from app.services.neo4j_service import Neo4jService
 from app.core.graph_workflow import build_workflow
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+class JsonFormatter(logging.Formatter):
+    """Structured JSON log lines (one object per line, greppable/jq-able)."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S%z"),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exc"] = self.formatException(record.exc_info)
+        extra = getattr(record, "fields", None)
+        if extra:
+            payload.update(extra)
+        return json.dumps(payload, default=str)
+
+
+# Configure logging (JSON lines)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+for handler in logging.getLogger().handlers:
+    handler.setFormatter(JsonFormatter())
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Code-Graph API", version="2.0")
@@ -29,6 +57,43 @@ app.add_middleware(
 
 # Build LangGraph workflow once
 workflow = build_workflow()
+
+
+# ─────────────────────────────────────────────
+# API key auth + rate limiting (env-driven)
+# ─────────────────────────────────────────────
+
+API_KEY = os.getenv("CODEGRAPH_API_KEY", "")
+RATE_LIMIT_PER_MINUTE = int(os.getenv("CODEGRAPH_RATE_LIMIT", "120"))
+
+_hits: "defaultdict[str, list[float]]" = defaultdict(list)
+
+
+@app.middleware("http")
+async def auth_and_rate_limit(request: Request, call_next):
+    """Optional API-key auth + simple per-IP sliding-window rate limit."""
+    if request.url.path.startswith(("/health", "/metrics/prometheus", "/ws")):
+        return await call_next(request)
+
+    if API_KEY:
+        key = request.headers.get("X-API-Key", "")
+        if key != API_KEY:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Missing or invalid X-API-Key"},
+            )
+
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.monotonic()
+    window = _hits[client_ip]
+    window[:] = [t for t in window if now - t < 60]
+    if len(window) >= RATE_LIMIT_PER_MINUTE:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded — slow down."},
+        )
+    window.append(now)
+    return await call_next(request)
 
 
 @app.get("/")
@@ -63,8 +128,9 @@ async def refactor_endpoint(request: RefactorRequest):
             "history": []
         }
 
-        # Run workflow
-        final_state = await workflow.ainvoke(state)
+        # Run workflow (with telemetry: timings, tokens, cost)
+        from app.core.graph_workflow import run_refactor
+        final_state = await run_refactor(state)
         
         # Check if validation ultimately passed
         if not final_state.get("validation_passed"):
@@ -342,6 +408,102 @@ def gardener_tickets(status: str = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/metrics")
+def metrics_summary(limit: int = 50, outcome: str = None):
+    """
+    Run metrics: durations, tokens, cost, repair iterations, fallback usage.
+    """
+    try:
+        from app.core.telemetry import Telemetry
+        return Telemetry().aggregate(limit=limit, outcome=outcome)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/metrics/cost")
+def metrics_cost():
+    """
+    Cost & token usage per model over all runs (estimated from Groq pricing).
+    """
+    try:
+        from app.core.telemetry import Telemetry
+        return Telemetry().cost_summary()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/metrics/prometheus")
+def metrics_prometheus():
+    """
+    Run metrics in Prometheus text exposition format (zero-dependency export).
+    """
+    try:
+        from app.core.telemetry import Telemetry
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(Telemetry().to_prometheus(),
+                                 media_type="text/plain; version=0.0.4")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/metrics/health")
+def metrics_health(project_root: str = ""):
+    """
+    Codebase health score: complexity, hotspots, dead-code density,
+    tech-debt ratio, maintainability rating (A–E).
+    """
+    try:
+        from app.core.code_health import CodeHealth
+        root = project_root or get_project_root()
+        return CodeHealth().compute(root)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/metrics/trends")
+def metrics_trends(days: int = 30):
+    """
+    Health snapshot trend: does the codebase get better or worse over time?
+    """
+    try:
+        from app.core.code_health import CodeHealth
+        return {"snapshots": CodeHealth().trends(days=days)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/metrics/health/snapshot")
+def metrics_health_snapshot(project_root: str = ""):
+    """
+    Compute and persist a health snapshot (start of the trend series).
+    """
+    try:
+        from app.core.code_health import CodeHealth
+        root = project_root or get_project_root()
+        return CodeHealth().snapshot(root)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/benchmarks")
+def benchmarks_summary():
+    """
+    RefactorBench scoreboard: resolution rate, costs, blast accuracy,
+    and the graph-vs-grep moat A/B verdict.
+    """
+    try:
+        from app.core.benchmark import BenchmarkStore
+        store = BenchmarkStore()
+        return {
+            "scoreboard": store.summary(),
+            "blast_accuracy": store.blast_accuracy(),
+            "moat": store.moat_summary(),
+            "recent_runs": store.recent_runs(limit=20),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/health")
 def health_check():
     """
@@ -375,16 +537,23 @@ def health_check():
     return health
 
 
-# WebSocket for streaming progress (MVP placeholder)
+# WebSocket for streaming workflow progress (real events from the bus)
 @app.websocket("/ws/refactor")
 async def websocket_endpoint(websocket: WebSocket):
+    from app.core.progress import bus
     await websocket.accept()
+    sub_id = bus.subscribe()
     try:
+        await websocket.send_json({"event": "connected", "sub_id": sub_id})
         while True:
-            data = await websocket.receive_text()
-            await websocket.send_text(f"Message text was: {data}")
+            event = await bus.next_event(sub_id, timeout=30.0)
+            if event is None:
+                continue
+            await websocket.send_json(event)
     except WebSocketDisconnect:
         pass
+    finally:
+        bus.unsubscribe(sub_id)
 
 
 if __name__ == "__main__":

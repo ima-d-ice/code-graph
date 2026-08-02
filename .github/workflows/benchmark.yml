@@ -1,0 +1,41 @@
+name: RefactorBench nightly
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Run baseline benchmark (grep mode, no Neo4j needed)
+        working-directory: backend
+        env:
+          GROQ_API_KEY_1: ${{ secrets.GROQ_API_KEY_1 }}
+          GROQ_API_KEY_2: ${{ secrets.GROQ_API_KEY_2 }}
+          GROQ_API_KEY_3: ${{ secrets.GROQ_API_KEY_3 }}
+        run: |
+          python ../examples/run_benchmark.py \
+            --tasks rename --sizes 10 --modes grep --trials 1 \
+            | tee bench_out.txt
+
+      - name: Report scoreboard
+        run: |
+          {
+            echo "## RefactorBench nightly (baseline)"
+            echo '```'
+            grep -A 20 "SCOREBOARD" bench_out.txt || echo "benchmark skipped (no GROQ_API_KEY_1 secret)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
