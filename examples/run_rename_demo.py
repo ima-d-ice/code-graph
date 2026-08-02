@@ -110,9 +110,9 @@ def main():
     }
 
     print(f"\n🚀 Running graph-native refactor on {args.files} files...")
-    workflow = build_workflow()
+    from app.core.graph_workflow import run_refactor
     import asyncio
-    final_state = asyncio.run(workflow.ainvoke(state))
+    final_state = asyncio.run(run_refactor(state))
 
     remaining = call_sites_remaining(DEMO_REPO)
     touched = decoys_touched(DEMO_REPO, pristine_decoys)

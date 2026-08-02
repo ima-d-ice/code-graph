@@ -156,7 +156,7 @@ class Gardener:
 
     async def _execute_ticket(self, ticket: Dict[str, Any], project_root: str) -> Dict[str, Any]:
         """Run one ticket through the full gated workflow."""
-        from app.core.graph_workflow import build_workflow
+        from app.core.graph_workflow import run_refactor
 
         objective = (f"Remove the dead function {ticket['symbol']} from "
                      f"{ticket['file']} (it has zero callers in the codebase)")
@@ -179,8 +179,7 @@ class Gardener:
         }
 
         logger.info(f"🌱 Executing ticket {ticket['id']}: {objective}")
-        workflow = build_workflow()
-        final_state = await workflow.ainvoke(state)
+        final_state = await run_refactor(state, run_id=f"{ticket['id']}")
 
         ok = bool(final_state.get("validation_passed"))
         record_id = final_state.get("flight_record_id")
