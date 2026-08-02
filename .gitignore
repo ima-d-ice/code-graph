@@ -1,0 +1,35 @@
+# --- Dependencies & Environment ---
+node_modules/
+venv/
+.env
+/backend/.env
+
+# --- Python Internals (Recursive) ---
+# This one line handles every __pycache__ in the entire project
+__pycache__/
+# Also ignore compiled python files that might appear outside cache folders
+*.py[cod]
+
+# --- Database & Storage ---
+# Ignore chroma_db wherever it appears (backend, root, etc)
+chroma_db/
+
+# --- Machine-specific state ---
+# workspace.json contains absolute local paths — never commit it
+workspace.json
+
+# --- Tool caches ---
+.pytest_cache/
+.mypy_cache/
+.bandit/
+htmlcov/
+.coverage
+
+# --- OS Junk ---
+.DS_Store
+Thumbs.db
+
+# --- Git & Builds ---
+.git/
+dist/
+build/
