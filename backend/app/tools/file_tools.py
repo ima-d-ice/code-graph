@@ -25,11 +25,14 @@ def read_file(file_path: str, project_root: str) -> str:
     try:
         with open(full_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
-            
+
         result = []
         for i, line in enumerate(lines, 1):
+            if i > 200:
+                result.append(f"... ({len(lines) - 200} more lines truncated)")
+                break
             result.append(f"{i:4d} | {line.rstrip('\n')}")
-            
+
         return "\n".join(result)
     except Exception as e:
         return f"Error reading file: {e}"

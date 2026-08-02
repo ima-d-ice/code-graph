@@ -158,7 +158,8 @@ GROQ_MODELS = [
 # Which models to use for each task type (ordered by preference)
 # NOTE: groq/compound and compound-mini do NOT support tool calling —
 # only use them for no-tool tasks (RAG synthesis, quick search).
-NO_TOOL_CALLING_MODELS = {"groq/compound", "groq/compound-mini"}
+NO_TOOL_CALLING_MODELS = {"groq/compound", "groq/compound-mini",
+                          "meta-llama/llama-prompt-guard-2-86m"}
 
 TASK_MODEL_MAP: Dict[str, List[str]] = {
     TaskType.PLANNING: [
@@ -434,19 +435,27 @@ class LLMRouter:
         """
         Classify a prompt with llama-prompt-guard-2-86m (prompt injection gate).
 
-        The guard model has a small context window, so the prompt is truncated
-        to a bounded window before classification (fail-open on any error).
+        The guard model has a tiny context AND a tiny max-completion budget, so
+        the prompt is truncated to a bounded window and max_tokens is capped
+        (fail-open on any error).
         """
         provider = self._select_provider(TaskType.SAFETY)
         if not provider:
             return None
 
         # Guard only needs a bounded window to detect an injection
-        if len(prompt) > 4000:
-            prompt = prompt[:4000]
+        if len(prompt) > 2000:
+            prompt = prompt[:2000]
 
         try:
-            client = self._build_client(provider)
+            from langchain_groq import ChatGroq
+            client = ChatGroq(
+                model=provider.model,
+                api_key=provider.api_key,
+                temperature=0,
+                max_tokens=16,
+                max_retries=0,
+            )
             messages = [{"role": "user", "content": prompt}]
             response = await client.ainvoke(messages)
             text = (response.content or "").strip()
@@ -456,7 +465,14 @@ class LLMRouter:
             self.session_tokens += tokens
             self.session_requests += 1
 
-            return text.lower()
+            # llama-prompt-guard-2-86m returns a single probability score for
+            # the "prompt_attack" class (e.g. "0.9995" vs "0.0003"). Map it to
+            # a verdict the caller can match on: "prompt_attack" or "benign".
+            try:
+                score = float(text)
+                return "prompt_attack" if score >= 0.5 else "benign"
+            except ValueError:
+                return text.lower()
         except Exception as e:
             logger.warning(f"⚠️ Prompt guard failed: {e}")
             return None

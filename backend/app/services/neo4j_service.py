@@ -54,6 +54,11 @@ class Neo4jService:
             uri = uri.replace("neo4j+s://", "neo4j+ssc://")
 
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
+
+        # The driver's notification logger is noisy: an empty or stale digital
+        # twin emits DBMS WARNINGs about missing edge types (MUTATES, READS,
+        # IMPORTS...) on every query. Suppress below ERROR to keep logs clean.
+        logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
         
         logger.info(f"🕸️ Neo4j connected to {uri} (db: {self.database})")
 

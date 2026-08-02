@@ -36,12 +36,23 @@ class ExecutorAgent:
                   graph_context: Dict[str, Any]) -> List[Dict[str, str]]:
         """Generate code changes based on the plan."""
 
-        # Build context (bounded: cap per-file content to keep within model context)
+        # Build context (bounded: cap both per-file content AND the number of
+        # files so the prompt fits the smallest tool-capable model's budget).
+        MAX_FILES = 8
+        MAX_CHARS = 30000
         context_str = f"OBJECTIVE:\n{objective}\n\nPLAN:\n{json.dumps(plan, indent=2)}\n\nAFFECTED FILES:\n"
+        budget = MAX_CHARS
+        shown = 0
         for path, content in affected_files.items():
-            if len(content) > 6000:
-                content = content[:6000] + "\n... (truncated)"
+            if shown >= MAX_FILES or budget <= 0:
+                break
+            if len(content) > 4000:
+                content = content[:4000] + "\n... (truncated)"
             context_str += f"--- {path} ---\n{content}\n\n"
+            shown += 1
+            budget -= len(content) + 40
+        if len(affected_files) > shown:
+            context_str += f"\n... and {len(affected_files) - shown} more affected file(s) (truncated).\n"
 
         system_prompt = """You are an expert refactoring engine.
 You have the plan and the contents of all affected files.

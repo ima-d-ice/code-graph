@@ -36,9 +36,22 @@ class HybridRAG:
     - Graph enrichment happens at query time, not ingestion
     """
 
+    _instance = None
+
     def __init__(self, llm_router=None):
         from app.services.neo4j_service import Neo4jService
         self.neo4j = Neo4jService()
+
+        # Process-level singleton: a second Chroma PersistentClient on the same
+        # path in one process corrupts the SQLite lock state ("attempt to write
+        # a readonly database"). Reuse the first instance instead.
+        cls = type(self)
+        if cls._instance is not None:
+            existing = cls._instance
+            self.neo4j.close()
+            self.__dict__ = existing.__dict__
+            return
+        cls._instance = self
 
         # Local embeddings — zero API cost, no rate limits
         try:
@@ -195,20 +208,28 @@ class HybridRAG:
             logger.debug(f"  Chunk cleanup note: {e}")
 
     def wipe_vector_store(self):
-        """Delete all data from the vector store."""
-        if os.path.exists(self.vector_db_path):
-            shutil.rmtree(self.vector_db_path)
-            logger.info("🗑️ ChromaDB wiped")
+        """Delete all data from the vector store.
 
-        # Re-initialize
-        import chromadb
-        self._chroma_client = chromadb.PersistentClient(path=self.vector_db_path)
+        Never rmtree a live ChromaDB path (SQLite lock/files get corrupted —
+        "attempt to write a readonly database"). Drop and recreate the
+        collection instead.
+        """
+        try:
+            try:
+                self._chroma_client.delete_collection("code_snippets")
+                logger.info("🗑️ ChromaDB collection dropped")
+            except Exception:
+                pass  # collection may not exist yet
+            self._chroma_client.create_collection("code_snippets")
+        except Exception as e:
+            logger.warning(f"ChromaDB wipe note: {e}")
         from langchain_chroma import Chroma
         self.vector_store = Chroma(
             client=self._chroma_client,
             collection_name="code_snippets",
             embedding_function=self.embeddings,
         )
+        logger.info("✅ ChromaDB vector store re-initialized")
 
     # ─────────────────────────────────────────
     # Search

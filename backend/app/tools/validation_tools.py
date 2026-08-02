@@ -133,7 +133,14 @@ def validate_graph_integrity(changes: List[Dict[str, str]], project_root: str,
             tree = ast.parse(change["content"])
         except SyntaxError:
             continue  # gate 1 already flags this
-        new_tree_by_file[os.path.join(project_root, file_path)] = tree
+        abs_path = os.path.join(project_root, file_path)
+        new_tree_by_file[abs_path] = tree
+
+    # Changed files must be checked against their NEW content, not the stale
+    # on-disk version: substitute the proposed trees into the per-file maps.
+    for abs_path, tree in new_tree_by_file.items():
+        per_file[abs_path] = _collect_module_symbols(tree)
+        per_file_refs[abs_path] = _collect_references(tree)
 
     # Symbols a changed file used to define and no longer does
     removed_symbols: set = set()

@@ -176,12 +176,16 @@ async def generate_node(state: RefactorState) -> Dict[str, Any]:
     from app.core.rename_propagation import propagate_renames
     
     agent = ExecutorAgent(state["project_root"])
-    changes = await agent.run(
-        state["objective"], 
-        state["plan"], 
-        state["affected_files"], 
-        state["graph_context"]
-    )
+    try:
+        changes = await agent.run(
+            state["objective"], 
+            state["plan"], 
+            state["affected_files"], 
+            state["graph_context"]
+        )
+    except Exception as e:
+        logger.warning(f"⚠️ Executor failed ({e}); falling back to deterministic rename")
+        changes = []
 
     # Graph-native guarantee: if the executor's trigger-file change didn't
     # actually perform the rename, override with the deterministic
@@ -281,11 +285,15 @@ async def repair_node(state: RefactorState) -> Dict[str, Any]:
     from app.core.rename_propagation import propagate_renames
     
     agent = RepairAgent(state["project_root"])
-    changes = await agent.run(
-        state["proposed_changes"],
-        state["validation_report"],
-        state["affected_files"]
-    )
+    try:
+        changes = await agent.run(
+            state["proposed_changes"],
+            state["validation_report"],
+            state["affected_files"]
+        )
+    except Exception as e:
+        logger.warning(f"⚠️ Repair agent failed ({e}); falling back to deterministic rename")
+        changes = []
 
     # If the repair LLM also failed to touch the trigger file, fall back to
     # the deterministic objective-driven rename — the graph guarantees the

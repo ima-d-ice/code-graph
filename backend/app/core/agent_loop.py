@@ -132,13 +132,17 @@ class AgentLoop:
                 ]
             messages.append(msg)
             
-            # Tool results
+            # Tool results (bounded: a single tool result — e.g. impact_analysis
+            # over a large repo — must not blow the message window)
             for res in turn.tool_results:
+                output = res.output
+                if len(output) > 3000:
+                    output = output[:3000] + "\n... (truncated)"
                 messages.append({
                     "role": "tool",
                     "tool_call_id": res.tool_call_id,
                     "name": next((tc.name for tc in turn.tool_calls if tc.id == res.tool_call_id), "unknown"),
-                    "content": res.output
+                    "content": output
                 })
                 
         return messages
